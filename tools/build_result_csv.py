@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
-"""Generate result/competitors_all50.csv and .xlsx: one 17-column row per competitor.
+"""Generate result/competitors_all50.csv and .xlsx: one 20-column row per competitor.
 Takes the messaging columns from phase2/phase2_website_messaging_all50.csv, except Positioning
 overrides and Differentiation, which come from result/positioning_differentiation.csv.
 PitchSense Category lists the Product Narrative v1 areas (four intelligences on one shared memory) in which
 the competitor has documented capability: a Phase 1 Table B score of 1 or 2 in
 phase1/pitchsense_competitor_research_master.md. Unverified (starred) points are left out, as in the Phase 1 total.
+Certifications, Certification Count and Compliance Claims come from result/certifications.csv (hand-maintained,
+captured from each vendor's own security/trust pages). Only audited certifications/attestations are counted
+(SOC, ISO, PCI DSS, FedRAMP, CSA STAR, HITRUST...); regulatory claims (GDPR, HIPAA, CCPA...) are listed, not counted.
 Usage (from the project root): python3 -I tools/build_result_csv.py"""
 import csv, os, re, sys
 
 WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(WS, 'phase2', 'phase2_website_messaging_all50.csv')
 FIX = os.path.join(WS, 'result', 'positioning_differentiation.csv')
+CERT = os.path.join(WS, 'result', 'certifications.csv')
 P1 = os.path.join(WS, 'phase1', 'pitchsense_competitor_research_master.md')
 OUT = os.path.join(WS, 'result', 'competitors_all50.csv')
 CATS = ['Call Intelligence', 'Deal Intelligence', 'Content Intelligence', 'Coaching Intelligence', 'Shared Memory']
 COLS = ['Company', 'Website', 'Category', 'PitchSense Category', 'PitchSense Overlap (of 10)', 'ICP', 'Pain Points', 'H1', 'H2',
         'Hero Description', 'Primary CTA', 'Secondary CTA', 'Section Headings', 'Positioning', 'Differentiation',
-        'Source URLs', 'Verification Status']
+        'Certifications', 'Certification Count', 'Compliance Claims', 'Source URLs', 'Verification Status']
 OUT_XLSX = os.path.join(WS, 'result', 'competitors_all50.xlsx')
 
 
@@ -51,11 +55,11 @@ def write_xlsx(path, header, data):
     from xml.sax.saxutils import escape
     col = lambda i: (col((i // 26) - 1) if i >= 26 else '') + chr(65 + i % 26)
     clean = lambda s: escape(re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', str(s)))
-    narrow = ('PitchSense Overlap (of 10)',)
-    width = {'Company': 24, 'Website': 24, 'Category': 26, 'PitchSense Category': 30, 'PitchSense Overlap (of 10)': 14, 'Verification Status': 70}
+    narrow = ('PitchSense Overlap (of 10)', 'Certification Count')
+    width = {'Company': 24, 'Website': 24, 'Category': 26, 'PitchSense Category': 30, 'PitchSense Overlap (of 10)': 14, 'Certifications': 32, 'Certification Count': 14, 'Compliance Claims': 28, 'Verification Status': 70}
     def cell(r, c, v, style):
         ref = f'{col(c)}{r}'
-        if isinstance(v, str) and re.fullmatch(r'\d+', v) and COLS[c] == 'PitchSense Overlap (of 10)':
+        if isinstance(v, str) and re.fullmatch(r'\d+', v) and COLS[c] in narrow:
             return f'<c r="{ref}" s="{style}"><v>{v}</v></c>'
         return f'<c r="{ref}" s="{style}" t="inlineStr"><is><t xml:space="preserve">{clean(v)}</t></is></c>'
     rows_xml = ['<row r="1">' + ''.join(cell(1, i, h, 1) for i, h in enumerate(header)) + '</row>']
@@ -119,16 +123,31 @@ missing = [r['Company'] for r in rows if r['Company'] not in fix]
 extra = sorted(set(fix) - {r['Company'] for r in rows})
 if missing or extra:
     sys.exit(f'FAIL - company sets differ. Missing from fix file: {missing}; unknown in fix file: {extra}')
+cert = {r['Company']: r for r in rd(CERT)}
+missing = [r['Company'] for r in rows if r['Company'] not in cert]
+extra = sorted(set(cert) - {r['Company'] for r in rows})
+if missing or extra:
+    sys.exit(f'FAIL - company sets differ. Missing from certifications.csv: {missing}; unknown there: {extra}')
+for c in cert.values():
+    n, items = c['Certification Count'].strip(), [x for x in c['Certifications'].split(';') if x.strip()]
+    if n != 'Not verified' and (not n.isdigit() or int(n) != len(items)):
+        sys.exit(f"FAIL - certifications.csv {c['Company']}: count {n!r} does not match {len(items)} listed certifications")
+    if not c['Source URLs'].strip():
+        sys.exit(f"FAIL - certifications.csv {c['Company']}: no source URL")
 
 data = []
 for r in rows:
-    x = fix[r['Company']]
+    x, c = fix[r['Company']], cert[r['Company']]
     data.append([r['Company'], r['Website'], r['Category']] + p1[key(r['Company'])] + [r['ICP'], r['Pain Point'], r['H1'], r['H2'],
                  r['Hero Description'], r['Primary CTA'], r['Secondary CTA'],
                  lines(r['Section Heading 1'], r['Section Heading 2'], r['Section Heading 3']),
                  x['Positioning'].strip() or r['Positioning'], x['Differentiation'],
-                 lines(r['Source URL'], x['Source URLs']),
-                 r['Verification'] + '\nPositioning/Differentiation: ' + x['Verification']])
+                 '\n'.join(i.strip() for i in c['Certifications'].split(';') if i.strip())
+                 or ('Not verified' if c['Certification Count'].strip() == 'Not verified' else 'None stated on site'),
+                 c['Certification Count'].strip(), '; '.join(i.strip() for i in c['Compliance Claims'].split(';') if i.strip()),
+                 lines(r['Source URL'], x['Source URLs'], c['Source URLs']),
+                 r['Verification'] + '\nPositioning/Differentiation: ' + x['Verification']
+                 + '\nCertifications (' + c['Captured'] + '): ' + c['Notes']])
 with open(OUT, 'w', newline='', encoding='utf-8') as f:
     w = csv.writer(f)
     w.writerow(COLS)
